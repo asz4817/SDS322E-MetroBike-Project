@@ -1,0 +1,143 @@
+---
+title: "SDS Project Regression"
+output: html_document
+---
+
+```{r global_options, include=FALSE}
+# Note the different type of output above?
+
+# The following code is a basic setup of options for your document
+knitr::opts_chunk$set(echo = FALSE, # by default: not showing code
+                      eval = TRUE, # by default: running code
+                      warning = TRUE, # by default: showing warnings
+                      message = FALSE, # by default: not showing messages
+                      fig.align = "center")
+
+# Load packages
+library(tidyverse)
+library(plotROC)
+library(caret)
+
+```
+
+# 2. **Methods**
+
+*Uploading the packages and data we need from the City of Austin Metro Bike Database and cleaning the dataset.*
+
+```{r echo = FALSE}
+#Upload Package
+library(tidyverse)
+library(readr)
+```
+
+```{r}
+#Download the data and store it
+BikeData <- read_csv("Austin_MetroBike_Trips_20240228.csv")
+dim(BikeData)
+```
+
+**We start with 35320 rows and 14 columns (variables).**
+
+*Creating our new variables and cleaning the data set:*
+
+```{r}
+#Add Seasons
+BikeData <- BikeData |> mutate(Season = case_when(
+  Month %in% c(12,1,2) ~ "Winter",
+  Month %in% c(3,4,5) ~ "Spring",
+  Month %in% c(6,7,8) ~ "Summer",
+  Month %in% c(9,10,11) ~ "Fall"
+)) |>
+#Edit the time to take away the colons
+  mutate(Time = BikeData$`Checkout Time` |>
+  str_remove(":") |>
+  str_remove(":")) |>
+# Convert Checkout.Date values to days of the week
+  mutate(Weekday = ifelse(weekdays(as.Date(`Checkout Date`)) %in% c("Saturday", "Sunday"), "Weekend", "Weekday"))
+
+#Change the var type of time to numerical data}
+BikeData$Time <- as.numeric(BikeData$Time)
+BikeData$Time <- BikeData$Time %/% 10000 + ((BikeData$Time%%10000)%/%100)/60
+
+#Since we won't be working with every column in this data set, we can create a separate data set to manipulate with only the variables we want to explore.
+MetroBike <- BikeData |> select(
+  TripId = `Trip ID`, BikeId = `Bicycle ID`,
+  Duration = `Trip Duration Minutes`,
+  DayType = Weekday, Time, 
+  BikeType = `Bike Type`,
+  Season, Year) |>
+  mutate(BikeType = recode(BikeType, "Classic" = "classic", "Electric" = "electric"))|>
+  filter(Year > 2019)
+
+```
+
+```{r echo = TRUE}
+#Changing the variables to the correct variable type, and making BikeType a numerical factor for the logistic regression
+MetroBike$DayType <- as.character(MetroBike$DayType)
+MetroBike$Season <- as.character(MetroBike$Season)
+MetroBike$BikeType <- if_else(MetroBike$BikeType == "classic", 0, 1)
+
+dim(MetroBike)
+35320
+```
+
+# Trip Duration \~ Year + Season with KNN Model
+
+Creating the model, testing with whole dataset:
+
+```{r echo = TRUE}
+fit_knn <- knnreg(Duration ~ Year + Time, data = MetroBike, k=5)
+
+MetroBike |> mutate(predicted = predict(fit_knn, MetroBike)) |> select(Duration, predicted) |> head(n=10)
+
+sqrt(mean((MetroBike$Duration - predict(fit_knn, MetroBike))^2))
+```
+
+#### **Cross Validation:**
+
+*Creating the folds:*
+
+```{r echo = TRUE}
+# Choose number of folds
+k = 5 
+
+# To have the same random sample, use set.seed
+set.seed(322)
+
+# Randomly order rows in the dataset
+data <- MetroBike[sample(nrow(MetroBike)), ] 
+
+# Create k folds from the dataset
+folds <- cut(seq(1:nrow(data)), breaks = k, labels = FALSE)
+```
+
+*Performing the 5-fold cross validation and finding the mean performance and variatiﬁon:*
+
+```{r}
+# Initialize a vector to keep track of the performance for each k-fold
+perf_k <- NULL
+
+# Use a for-loop to get performance for each k-fold
+for(i in 1:k){
+  # Split data into train and test data
+  train_not_i <- data[folds != i, ] # train data = all observations except in fold i
+  test_i <- data[folds == i, ]  # test data = observations in fold i
+  
+  # Train model on train data (all but fold i)
+  train_model <- knnreg(Duration ~ Year + Time, 
+                    data = train_not_i,
+                    k=5)
+  
+  # Performance listed for each test data = fold i
+  perf_k[i] <- sqrt(mean((
+    test_i$Duration - predict(train_model, newdata = test_i))^2, 
+    na.rm = TRUE))
+}
+
+# Performance for each fold 
+perf_k
+
+#stats
+mean(perf_k)
+sd(perf_k)
+```
